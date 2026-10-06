@@ -7,6 +7,13 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+/// Translate an English UI string into the current language (see [`i18n`]).
+macro_rules! tl {
+    ($s:expr) => {
+        $crate::i18n::t($s)
+    };
+}
+
 mod a11y_ui;
 mod actions_ui;
 pub mod canvas;
@@ -295,7 +302,8 @@ pub struct PrintCraftApp {
     /// Comment author, per-tool colours and widths, pin.
     pub comment_prefs: comments::CommentPrefs,
     pub theme: ThemeKind,
-    pub language: i18n::Language,
+    /// Interface language preference: `auto` (follow the system) or a code from [`i18n::LANGUAGES`].
+    pub language: String,
     /// Follow the operating system's light/dark setting.
     pub follow_system_theme: bool,
     pub dialog: Option<Dialog>,
@@ -471,7 +479,7 @@ impl PrintCraftApp {
             quick_tool: QuickTool::Select,
             comment_prefs: Default::default(),
             theme: ThemeKind::Light,
-            language: i18n::Language::default(),
+            language: i18n::AUTO.to_string(),
             follow_system_theme: false,
             dialog: None,
             update_source: None,
@@ -870,8 +878,8 @@ impl PrintCraftApp {
         if let Ok(t) = serde_json::from_value::<ThemeKind>(v["theme"].clone()) {
             self.theme = t;
         }
-        if let Ok(language) = serde_json::from_value::<i18n::Language>(v["language"].clone()) {
-            self.language = language;
+        if let Some(language) = v["language"].as_str().and_then(i18n::normalize_pref) {
+            self.language = language.to_string();
         }
         // An empty or missing name keeps the login-name default; settings are untrusted, so the
         // name is cut to a sane length.
@@ -915,7 +923,11 @@ impl PrintCraftApp {
         let view = self.active.and_then(|i| self.views.get_mut(i));
         match (key, view) {
             ("language", _) => {
-                self.language = i18n::Language::parse(value).ok_or("language must be en or ja")?;
+                let language = i18n::normalize_pref(value).ok_or_else(|| {
+                    let codes: Vec<&str> = std::iter::once(i18n::AUTO).chain(i18n::Lang::all().map(i18n::Lang::code)).collect();
+                    format!("language must be one of {}", codes.join(", "))
+                })?;
+                self.language = language.to_string();
             }
             ("theme", _) => {
                 self.follow_system_theme = value == "system";
@@ -1192,6 +1204,7 @@ impl eframe::App for PrintCraftApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        i18n::set_current(i18n::Lang::from_pref(&self.language));
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
             ctx.request_repaint();
