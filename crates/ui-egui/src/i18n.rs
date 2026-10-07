@@ -7,15 +7,28 @@ pub enum Language {
     #[default]
     En,
     Ja,
+    /// BCP-47 lower-case code: the variant name alone would serialize as `ptbr`.
+    #[serde(rename = "pt-br")]
+    PtBr,
 }
 
 impl Language {
-    pub const ALL: [Self; 2] = [Self::En, Self::Ja];
+    pub const ALL: [Self; 3] = [Self::En, Self::Ja, Self::PtBr];
+
+    /// The persisted / `ui.set` code (`en`, `ja`, `pt-br`).
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Ja => "ja",
+            Self::PtBr => "pt-br",
+        }
+    }
 
     pub fn name(self) -> &'static str {
         match self {
             Self::En => "English",
             Self::Ja => "日本語",
+            Self::PtBr => "Português (Brasil)",
         }
     }
 
@@ -23,15 +36,19 @@ impl Language {
         match code {
             "en" => Some(Self::En),
             "ja" => Some(Self::Ja),
+            "pt-br" => Some(Self::PtBr),
             _ => None,
         }
     }
 
     pub fn tr(self, text: &str) -> &str {
-        if self == Self::Ja
-            && let Some((_, japanese)) = JAPANESE.iter().find(|(english, _)| *english == text)
-        {
-            return japanese;
+        let table = match self {
+            Self::En => return text,
+            Self::Ja => JAPANESE,
+            Self::PtBr => PORTUGUESE,
+        };
+        if let Some((_, translated)) = table.iter().find(|(english, _)| *english == text) {
+            return translated;
         }
         text
     }
@@ -89,6 +106,59 @@ const JAPANESE: &[(&str, &str)] = &[
     ("OK", "OK"),
 ];
 
+/// Brazilian Portuguese: the same keys as `JAPANESE`, translated for pt-BR.
+const PORTUGUESE: &[(&str, &str)] = &[
+    ("Menu", "Menu"),
+    ("File", "Arquivo"),
+    ("Edit", "Editar"),
+    ("Pages", "Páginas"),
+    ("View", "Exibir"),
+    ("Help", "Ajuda"),
+    ("Preferences", "Preferências"),
+    ("Preferences…", "Preferências…"),
+    ("Interface language", "Idioma da interface"),
+    ("Identity", "Identidade"),
+    ("Name on new comments", "Nome nos novos comentários"),
+    ("Open…", "Abrir…"),
+    ("New blank PDF", "Novo PDF em branco"),
+    ("Create PDF from file…", "Criar PDF a partir de arquivo…"),
+    ("Create PDF from images…", "Criar PDF a partir de imagens…"),
+    ("Create PDF from clipboard", "Criar PDF a partir da área de transferência"),
+    ("Combine files…", "Combinar arquivos…"),
+    ("Save", "Salvar"),
+    ("Save as…", "Salvar como…"),
+    ("Close file", "Fechar arquivo"),
+    ("Close all", "Fechar tudo"),
+    ("Revert", "Reverter"),
+    ("Print…", "Imprimir…"),
+    ("Document properties…", "Propriedades do documento…"),
+    ("Undo", "Desfazer"),
+    ("Redo", "Refazer"),
+    ("Find…", "Localizar…"),
+    ("Advanced search…", "Pesquisa avançada…"),
+    ("Copy pages", "Copiar páginas"),
+    ("Cut pages", "Recortar páginas"),
+    ("Paste pages", "Colar páginas"),
+    ("Fit visible", "Ajustar ao visível"),
+    ("Marquee zoom", "Zoom por seleção"),
+    ("Take a snapshot", "Capturar instantâneo"),
+    ("Full screen mode", "Modo de tela cheia"),
+    ("Read mode", "Modo de leitura"),
+    ("Switch light / dark theme", "Alternar tema claro / escuro"),
+    ("Comments panel", "Painel de comentários"),
+    ("Form fields panel", "Painel de campos de formulário"),
+    ("Clear form", "Limpar formulário"),
+    ("Find tools and commands…", "Localizar ferramentas e comandos…"),
+    ("Zoom", "Zoom"),
+    ("Actual size", "Tamanho real"),
+    ("Zoom to page level", "Ajustar à página"),
+    ("Fit to width", "Ajustar à largura"),
+    ("Display theme", "Tema de exibição"),
+    ("Side panels", "Painéis laterais"),
+    ("Enable Acrobat JavaScript", "Ativar o Acrobat JavaScript"),
+    ("OK", "OK"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +176,42 @@ mod tests {
     }
 
     #[test]
+    fn portuguese_translations_are_unique_and_cover_the_same_keys() {
+        assert_eq!(PORTUGUESE.len(), JAPANESE.len());
+        for (i, (en, pt)) in PORTUGUESE.iter().enumerate() {
+            assert!(!pt.is_empty());
+            assert!(PORTUGUESE.iter().take(i).all(|(other, _)| en != other));
+            assert_eq!(Language::En.tr(en), *en);
+        }
+        // Same keys, same order, no entry added or dropped against the Japanese table.
+        for ((en, ja), (pt_en, pt)) in JAPANESE.iter().zip(PORTUGUESE.iter()) {
+            assert_eq!(en, pt_en);
+            // Ellipsis style (`…`) is kept exactly as the English source uses it.
+            assert_eq!(ja.contains('…'), pt.contains('…'));
+        }
+        assert_eq!(Language::PtBr.tr("File"), "Arquivo");
+        assert_eq!(Language::PtBr.tr("Interface language"), "Idioma da interface");
+        assert_eq!(Language::PtBr.tr("Save as…"), "Salvar como…");
+        assert_eq!(Language::PtBr.tr("Arquivo do usuário.pdf"), "Arquivo do usuário.pdf");
+    }
+
+    #[test]
+    fn language_codes_parse_name_and_persist_as_expected() {
+        assert_eq!(Language::PtBr.code(), "pt-br");
+        assert_eq!(Language::En.code(), "en");
+        assert_eq!(Language::Ja.code(), "ja");
+        assert_eq!(Language::PtBr.name(), "Português (Brasil)");
+        assert_eq!(Language::parse("pt-br"), Some(Language::PtBr));
+        assert_eq!(Language::ALL, [Language::En, Language::Ja, Language::PtBr]);
+        for language in Language::ALL {
+            assert_eq!(Language::parse(language.code()), Some(language));
+            assert_eq!(serde_json::to_string(&language).unwrap().trim_matches('"'), language.code());
+        }
+        assert_eq!(serde_json::from_str::<Language>(r#""pt-br""#).unwrap(), Language::PtBr);
+        assert!(serde_json::from_str::<Language>(r#""pt""#).is_err());
+    }
+
+    #[test]
     fn language_persists_and_invalid_input_keeps_current_language() {
         let mut app = crate::PrintCraftApp::default();
         app.set_option("language", "ja").unwrap();
@@ -120,5 +226,19 @@ mod tests {
         let mut legacy = crate::PrintCraftApp::default();
         legacy.restore("{}");
         assert_eq!(legacy.language, Language::En);
+    }
+
+    #[test]
+    fn portuguese_is_selected_persists_and_falls_back_on_unknown_code() {
+        let mut app = crate::PrintCraftApp::default();
+        app.set_option("language", "pt-br").unwrap();
+        assert_eq!(app.language, Language::PtBr);
+        assert!(app.set_option("language", "pt").is_err());
+        assert_eq!(app.language, Language::PtBr);
+        let mut restored = crate::PrintCraftApp::default();
+        restored.restore(&app.persist());
+        assert_eq!(restored.language, Language::PtBr);
+        restored.restore(r#"{"language":"pt-br"}"#);
+        assert_eq!(restored.language, Language::PtBr);
     }
 }
