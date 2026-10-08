@@ -344,13 +344,13 @@ mod tests {
 
     #[test]
     fn language_persists_and_invalid_input_keeps_current_language() {
-        let mut app = crate::PrintCraftApp::default();
+        let mut app = crate::PdfCraftApp::default();
         assert_eq!(app.language, AUTO);
         app.set_option("language", "JA").unwrap();
         assert_eq!(app.language, "ja");
         assert!(app.set_option("language", "xx").is_err());
         assert_eq!(app.language, "ja");
-        let mut restored = crate::PrintCraftApp::default();
+        let mut restored = crate::PdfCraftApp::default();
         restored.restore(&app.persist());
         assert_eq!(restored.language, "ja");
         restored.restore(r#"{"language":"xx"}"#);
@@ -358,7 +358,7 @@ mod tests {
         app.set_option("language", AUTO).unwrap();
         assert_eq!(app.language, AUTO);
         // Settings written before the system-locale default (no key) follow the system.
-        let mut legacy = crate::PrintCraftApp::default();
+        let mut legacy = crate::PdfCraftApp::default();
         legacy.restore("{}");
         assert_eq!(legacy.language, AUTO);
     }
@@ -396,7 +396,7 @@ mod tests {
                     assert_eq!(src.ends_with('…'), tr.ends_with('…'), "{}: ellipsis mismatch: {src:?}", l.code);
                 }
                 if ctx == "@id" {
-                    assert!(printcraft_engine::commands::command(src).is_some(), "{}: unknown command id {src:?}", l.code);
+                    assert!(pdfcraft_engine::commands::command(src).is_some(), "{}: unknown command id {src:?}", l.code);
                 }
             }
         }

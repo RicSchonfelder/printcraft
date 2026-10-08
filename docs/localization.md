@@ -18,7 +18,7 @@ Japanese interface text uses BIZ UDPGothic from [craft-fonts](https://github.com
 
 ## How translations work
 
-PrintCraft uses the same system as PhotoCraft (`crates/ui-egui/src/i18n/`):
+PdfCraft uses the same system as PhotoCraft (`crates/ui-egui/src/i18n/`):
 
 - Strings in the code stay in English and serve as lookup keys. At draw time, `tl!("Save")` returns the text in the current language, and falls back to English when there is no entry.
 - Each language has a catalog, `crates/ui-egui/src/i18n/<code>.tsv`, with one entry per line: `context<TAB>English<TAB>translation`. An empty context marks a plain string. `@id` keys an entry by command id (for example `file.saveAs`), so one menu item can read differently from another with the same English label. `@plural` holds plural forms. Any other context disambiguates an English word with several meanings (`tr_ctx`). The header of `ja.tsv` documents the format and escapes.
