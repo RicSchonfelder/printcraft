@@ -25,8 +25,8 @@
 
 mod catalog;
 
+use std::cell::Cell;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use catalog::Catalog;
 
@@ -62,8 +62,19 @@ pub static LANGUAGES: [LangInfo; 2] = [
 ];
 
 impl LangInfo {
+    /// How many plural forms the language's `@plural` entries list.
+    fn plural_forms(&self) -> usize {
+        (0..=1000).map(self.plural).max().unwrap_or(0).saturating_add(1)
+    }
+
     fn catalog(&self) -> &Catalog {
-        self.catalog.get_or_init(|| Catalog::parse(self.source))
+        self.catalog.get_or_init(|| {
+            let (catalog, errors) = Catalog::parse(self.source, self.plural_forms());
+            for error in errors {
+                log::warn!("{} interface catalog: {error}; that entry shows in English", self.code);
+            }
+            catalog
+        })
     }
 }
 
@@ -194,19 +205,21 @@ fn detect_system_lang() -> Lang {
     Lang::EN
 }
 
-/// Index into [`LANGUAGES`] of the language the UI is drawn in this frame.
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Per thread, as in PhotoCraft: independent app and test threads (kittest harnesses run in
+    // parallel) must not change each other's drawing language.
+    static CURRENT: Cell<Lang> = const { Cell::new(Lang::EN) };
+}
 
 /// Set the UI language for drawing (the shell calls this once per frame from the preference), so
 /// widgets can translate without every call site carrying a language around.
 pub fn set_current(lang: Lang) {
-    let i = LANGUAGES.iter().position(|l| l.code == lang.code()).unwrap_or(0);
-    CURRENT.store(i, Ordering::Relaxed);
+    CURRENT.set(lang);
 }
 
 /// The language the UI is drawn in.
 pub fn current() -> Lang {
-    Lang(LANGUAGES.get(CURRENT.load(Ordering::Relaxed)).unwrap_or(&LANGUAGES[0]))
+    CURRENT.get()
 }
 
 /// Does `lang` have a catalog entry for this plain string? (English never does: it is the source.)
@@ -234,12 +247,29 @@ pub fn tr_id<'a>(lang: Lang, id: &str, label: &'a str) -> &'a str {
     lang.catalog().id(id).unwrap_or_else(|| tr(lang, label))
 }
 
-/// Fill `{name}` placeholders. Unknown placeholders are left as written.
+/// Fill `{name}` placeholders in one pass. Unknown placeholders are left as written, and inserted
+/// values are never read as templates again, so a file name containing `{n}` stays intact.
 pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (k, v) in args {
-        out = out.replace(&format!("{{{k}}}"), v);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some((before, after_open)) = rest.split_once('{') {
+        out.push_str(before);
+        let Some((name, after_close)) = after_open.split_once('}') else {
+            out.push('{');
+            out.push_str(after_open);
+            return out;
+        };
+        match args.iter().find(|(key, _)| *key == name) {
+            Some((_, value)) => out.push_str(value),
+            None => {
+                out.push('{');
+                out.push_str(name);
+                out.push('}');
+            }
+        }
+        rest = after_close;
     }
+    out.push_str(rest);
     out
 }
 
@@ -252,7 +282,7 @@ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::catalog::{parse_entries, placeholders};
+    use super::catalog::{Entry, parse_entries, placeholders};
     use super::*;
 
     const JA: fn() -> Lang = || Lang::from_code("ja").expect("ja registered");
@@ -311,9 +341,11 @@ mod tests {
 
     #[test]
     fn catalog_kinds_are_parsed_and_looked_up() {
-        let c = Catalog::parse(
+        let (c, errors) = Catalog::parse(
             "# c\n\tHello\tこんにちは\n@id\tfile.save\t保存する\nmenu\tWindows\tウィンドウ群\n@plural\t{n} file|{n} files\t{n} 個\n\n",
+            1,
         );
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(c.plain("Hello"), Some("こんにちは"));
         assert_eq!(c.id("file.save"), Some("保存する"));
         assert_eq!(c.contextual("menu", "Windows"), Some("ウィンドウ群"));
@@ -324,10 +356,95 @@ mod tests {
 
     #[test]
     fn malformed_lines_are_reported_not_fatal() {
-        let (entries, errors) = parse_entries("\tok\tはい\nno tabs here\n\tonly\n\ta\tb\tc\textra\n\t\tempty source\n");
+        let (entries, errors) = parse_entries("\tok\tはい\nno tabs here\n\tonly\n\ta\tb\tc\textra\n\t\tempty source\n", 1);
         assert_eq!(entries.len(), 1);
         assert_eq!(errors.len(), 4, "{errors:?}");
-        assert_eq!(parse_entries("\ta\\tb\tx\\ny\\\\z\n").0[0], (String::new(), "a\tb".into(), "x\ny\\z".into()));
+        let (entries, errors) = parse_entries("\ta\\tb\tx\\ny\\\\z\n", 1);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(entries, [Entry { context: String::new(), source: "a\tb".into(), translation: "x\ny\\z".into() }]);
+    }
+
+    #[test]
+    fn strict_validation_skips_only_the_bad_line() {
+        for (text, forms, error) in [
+            ("\tFile", 1, "context<TAB>"),
+            ("\tFile\t", 1, "nonempty"),
+            ("\tFile\\q\tFiles", 1, "unknown escape"),
+            ("\tFile\tFiles\\", 1, "trailing backslash"),
+            ("\tOpen…\tOpen", 1, "ellipsis"),
+            ("\tOpen {file}\tOpen {name}", 1, "placeholders"),
+            ("@plural\tpage\tPages", 1, "one|other"),
+            ("@plural\t{n} page|{n} pages\t{n} pages", 2, "2 nonempty"),
+            ("@plural\t{n} page|{n} pages\tPages", 1, "placeholders"),
+            ("@unknown\tFile\tFiles", 1, "reserved context"),
+        ] {
+            // The bad line comes first; the good line after it still loads.
+            let (catalog, errors) = Catalog::parse(&format!("{text}\n\tSave\t保存\n"), forms);
+            assert_eq!(errors.len(), 1, "{text:?}: {errors:?}");
+            assert!(errors[0].starts_with("line 1: ") && errors[0].contains(error), "{errors:?}");
+            assert_eq!(catalog.plain("Save"), Some("保存"), "{text:?}");
+        }
+        let (catalog, errors) = Catalog::parse("\tFile\tファイル\n\tFile\t別\n", 1);
+        assert!(errors.len() == 1 && errors[0].contains("line 2: duplicate"), "{errors:?}");
+        assert_eq!(catalog.plain("File"), Some("ファイル"), "the first entry wins");
+    }
+
+    #[test]
+    fn catalogs_handle_escapes_crlf_and_distinct_contexts() {
+        let (catalog, errors) =
+            Catalog::parse("# comment\r\n\r\n\tLine\\nTab\\tPath\\\\\tOther\\nTab\\tPath\\\\\r\nweight\tLight\tThin\r\ntheme\tLight\tPale\r\n", 1);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(catalog.plain("Line\nTab\tPath\\"), Some("Other\nTab\tPath\\"));
+        assert_eq!(catalog.contextual("weight", "Light"), Some("Thin"));
+        assert_eq!(catalog.contextual("theme", "Light"), Some("Pale"));
+    }
+
+    #[test]
+    fn broken_catalog_falls_back_to_english() {
+        static BROKEN: LangInfo =
+            LangInfo { code: "broken", name: "Broken test catalog", source: "malformed\n\\", plural: plural_none, catalog: OnceLock::new() };
+        assert_eq!(tr(Lang(&BROKEN), "File"), "File");
+        assert_eq!(trn(Lang(&BROKEN), 2, "{n} page", "{n} pages"), "2 pages");
+    }
+
+    #[test]
+    fn contextual_id_and_plural_lookups_have_english_fallbacks() {
+        static TEST: LangInfo = LangInfo {
+            code: "test",
+            name: "Test catalog",
+            source: "\tLight\tPlain light\nweight\tLight\tThin\n@id\tfile.open\tOpen dialog…\n@plural\t{n} page|{n} pages\tOne page: {n}|Many pages: {n}\n",
+            plural: plural_one_other,
+            catalog: OnceLock::new(),
+        };
+        let l = Lang(&TEST);
+        assert_eq!(tr_ctx(l, "weight", "Light"), "Thin");
+        assert_eq!(tr_ctx(l, "theme", "Light"), "Plain light");
+        assert_eq!(tr_ctx(l, "theme", "Unknown"), "Unknown");
+        assert_eq!(tr_id(l, "file.open", "Reworded English…"), "Open dialog…");
+        assert_eq!(tr_id(l, "unknown", "Light"), "Plain light");
+        assert_eq!(tr_id(l, "unknown", "Unknown"), "Unknown");
+        assert_eq!(trn(l, 1, "{n} page", "{n} pages"), "One page: 1");
+        assert_eq!(trn(l, 0, "{n} page", "{n} pages"), "Many pages: 0");
+        assert_eq!(trn(l, u64::MAX, "{n} page", "{n} pages"), format!("Many pages: {}", u64::MAX));
+    }
+
+    #[test]
+    fn formatting_reorders_parameters_without_reinterpreting_user_text() {
+        let args = [("file", "日本語-{n}.pdf"), ("n", "2")];
+        assert_eq!(fmt("{n}: {file}; {unknown}", &args), "2: 日本語-{n}.pdf; {unknown}");
+        assert_eq!(fmt("{file} / {file}", &args), "日本語-{n}.pdf / 日本語-{n}.pdf");
+        assert_eq!(fmt("text {unfinished", &args), "text {unfinished");
+        assert_eq!(fmt("}{n}{", &args), "}2{");
+        assert_eq!(fmt("unchanged", &[]), "unchanged");
+    }
+
+    #[test]
+    fn current_language_is_per_thread() {
+        set_current(JA());
+        assert_eq!(t("File"), "ファイル");
+        std::thread::spawn(|| assert_eq!(current(), Lang::EN)).join().unwrap();
+        set_current(Lang::EN);
+        assert_eq!(t("File"), "File");
     }
 
     #[test]
@@ -366,38 +483,17 @@ mod tests {
     /// Every bundled catalog is well-formed and consistent with its sources.
     #[test]
     fn bundled_catalogs_are_consistent() {
+        let mut codes = std::collections::HashSet::new();
         for l in &LANGUAGES {
+            assert!(codes.insert(l.code), "duplicate code {}", l.code);
             assert!(l.code == l.code.to_ascii_lowercase() && !l.name.is_empty(), "{}", l.code);
-            let (entries, errors) = parse_entries(l.source);
+            let (entries, errors) = parse_entries(l.source, l.plural_forms());
             assert!(errors.is_empty(), "{}: {errors:?}", l.code);
-            let mut seen = std::collections::HashSet::new();
-            for (ctx, src, tr) in &entries {
-                assert!(seen.insert((ctx.clone(), src.clone())), "{}: duplicate {ctx:?} {src:?}", l.code);
-                if ctx == "@plural" {
-                    let one_other: Vec<&str> = src.split('|').collect();
-                    assert_eq!(one_other.len(), 2, "{}: plural source must be `one|other`: {src:?}", l.code);
-                    let forms = (0..=1000).map(l.plural).max().unwrap_or(0) + 1;
-                    assert_eq!(tr.split('|').count(), forms, "{}: {forms} plural forms expected in {src:?}", l.code);
-                    for form in tr.split('|') {
-                        let mut want = placeholders(one_other[1]);
-                        let mut got = placeholders(form);
-                        want.sort_unstable();
-                        got.sort_unstable();
-                        assert_eq!(want, got, "{}: placeholders differ in {src:?}", l.code);
-                    }
-                    continue;
-                }
-                let mut want = placeholders(src);
-                let mut got = placeholders(tr);
-                want.sort_unstable();
-                got.sort_unstable();
-                assert_eq!(want, got, "{}: placeholders differ in {src:?}", l.code);
-                if ctx.is_empty() {
-                    assert_eq!(src.ends_with('…'), tr.ends_with('…'), "{}: ellipsis mismatch: {src:?}", l.code);
-                }
-                if ctx == "@id" {
-                    assert!(pdfcraft_engine::commands::command(src).is_some(), "{}: unknown command id {src:?}", l.code);
-                }
+            for e in entries.iter().filter(|e| e.context == "@id") {
+                let command = pdfcraft_engine::commands::command(&e.source);
+                let Some(command) = command else { panic!("{}: unknown command id {:?}", l.code, e.source) };
+                assert_eq!(placeholders(&e.translation), placeholders(command.label), "{}: {}", l.code, e.source);
+                assert_eq!(e.translation.ends_with('…'), command.label.ends_with('…'), "{}: ellipsis mismatch: {}", l.code, e.source);
             }
         }
     }
