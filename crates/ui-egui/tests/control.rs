@@ -4,8 +4,9 @@
 use std::sync::{Arc, Mutex};
 
 use egui_kittest::Harness;
-use printcraft_ui_egui::PrintCraftApp;
-use printcraft_ui_egui::control::{ControlClient, Reply};
+use egui_kittest::kittest::Queryable;
+use pdfcraft_ui_egui::PdfCraftApp;
+use pdfcraft_ui_egui::control::{ControlClient, Reply};
 use serde_json::{Value, json};
 
 fn fixture(n: usize) -> Vec<u8> {
@@ -33,11 +34,11 @@ fn fixture(n: usize) -> Vec<u8> {
     out
 }
 
-fn harness() -> (Harness<'static, PrintCraftApp>, ControlClient) {
+fn harness() -> (Harness<'static, PdfCraftApp>, ControlClient) {
     let slot: Arc<Mutex<Option<ControlClient>>> = Arc::default();
     let s = slot.clone();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |cc| {
-        let mut app = PrintCraftApp::new();
+        let mut app = PdfCraftApp::new();
         *s.lock().unwrap() = Some(app.attach_control(&cc.egui_ctx));
         app.open_bytes("doc.pdf", None, fixture(5)).unwrap();
         app
@@ -48,7 +49,7 @@ fn harness() -> (Harness<'static, PrintCraftApp>, ControlClient) {
 }
 
 /// Send a request and run frames until it is answered.
-fn call(h: &mut Harness<'static, PrintCraftApp>, c: &ControlClient, method: &str, params: Value) -> Reply {
+fn call(h: &mut Harness<'static, PdfCraftApp>, c: &ControlClient, method: &str, params: Value) -> Reply {
     let rx = c.send(method, params);
     for _ in 0..30 {
         h.step();
@@ -59,8 +60,42 @@ fn call(h: &mut Harness<'static, PrintCraftApp>, c: &ControlClient, method: &str
     panic!("{method}: no reply after 30 frames");
 }
 
-fn ok(h: &mut Harness<'static, PrintCraftApp>, c: &ControlClient, method: &str, params: Value) -> Value {
+fn ok(h: &mut Harness<'static, PdfCraftApp>, c: &ControlClient, method: &str, params: Value) -> Value {
     call(h, c, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
+}
+
+/// Switching the interface language changes labels only: documents, their dirty state and the
+/// command ids agents drive stay exactly the same.
+#[test]
+fn language_switch_preserves_document_and_command_ids() {
+    use pdfcraft_ui_egui::i18n;
+    let (mut h, c) = harness();
+    let doc = h.state().views[0].id;
+    h.state_mut().session.apply(doc, pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+    let documents = ok(&mut h, &c, "ui.state", json!({}))["documents"].clone();
+    assert_eq!(documents[0]["dirty"], true);
+    let commands = ok(&mut h, &c, "ui.commands", json!({}));
+    for code in ["ja", "en"] {
+        ok(&mut h, &c, "ui.set", json!({ "key": "language", "value": code }));
+        h.run_steps(2);
+        let state = ok(&mut h, &c, "ui.state", json!({}));
+        assert_eq!(state["language"], code);
+        assert_eq!(state["documents"], documents);
+        assert_eq!(ok(&mut h, &c, "ui.commands", json!({})), commands);
+
+        let lang = i18n::Lang::from_code(code).unwrap();
+        h.get_by_label(i18n::tr(lang, "Menu")).click();
+        h.run_steps(2);
+        h.get_by_label(&format!("{} ⏵", i18n::tr(lang, "File"))).hover();
+        h.run_steps(3);
+        h.get_by_label_contains(i18n::tr(lang, "Open…"));
+        ok(&mut h, &c, "ui.key", json!({ "key": "Escape" }));
+        ok(&mut h, &c, "ui.key", json!({ "key": "Escape" }));
+        h.run_steps(2);
+    }
+    let error = call(&mut h, &c, "ui.set", json!({ "key": "language", "value": "xx" })).unwrap_err();
+    assert!(error.contains("auto, en, ja"), "{error}");
+    assert_eq!(ok(&mut h, &c, "ui.state", json!({}))["language"], "en");
 }
 
 #[test]
@@ -171,7 +206,7 @@ fn screenshots_of_window_and_region() {
 fn loopback_transport_requires_the_token() {
     use std::io::{BufRead, BufReader, Write};
     let (mut h, c) = harness();
-    let ep = printcraft_ui_egui::control::serve(c).unwrap();
+    let ep = pdfcraft_ui_egui::control::serve(c).unwrap();
     let talk = |lines: Vec<Value>| {
         let port = ep.port;
         std::thread::spawn(move || {
@@ -192,7 +227,7 @@ fn loopback_transport_requires_the_token() {
             out
         })
     };
-    let pump = |h: &mut Harness<'static, PrintCraftApp>, t: std::thread::JoinHandle<Vec<Value>>| {
+    let pump = |h: &mut Harness<'static, PdfCraftApp>, t: std::thread::JoinHandle<Vec<Value>>| {
         while !t.is_finished() {
             h.step();
         }
