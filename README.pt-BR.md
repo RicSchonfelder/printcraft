@@ -15,7 +15,7 @@ Feito em Rust puro, funciona nativamente em macOS, Windows e Linux e também no 
 
 Selecione o idioma no menu (a tela inicial permanece em inglês por design do upstream; menus e diálogos seguem o idioma escolhido).
 
-PR #165 (tradução pt-BR) aberto no upstream (repositório renomeado para `storytold/pdfcraft`).
+PR #165 já foi MESCLADO no upstream (`storytold/pdfcraft`) — o mantenedor converteu a tradução para o sistema pt-br.tsv do novo catálogo.
 
 ## A suíte ArtCraft
 
